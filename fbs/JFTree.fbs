@@ -1,0 +1,42 @@
+// $ flatc --gen-mutable --es6-js-export --js JFTree.fbs
+
+namespace JF.Tree; // join-fork
+
+struct Unique (original_order) {
+  instance: uint64; // reverse bytes when allocated
+  allocator: uint64;
+}
+
+table TreeDatum {
+  tag: int32;
+  blob: [ubyte] (required);
+  label: string; // (optional)
+}
+
+table TreeStem {
+  unique: Unique (required);
+
+  keys: [string] (required);
+  /// stem.vals.length === 0 || stem.height === 0
+  vals: [TreeDatum] (required);
+  /// stem.vals.length === 0 || stem.height > 0
+  refs: [Unique] (required);
+
+  prior: string (required);
+  next: string (required);
+
+  commit: uint64;
+  /// local commit last merged into origin
+  merge: uint64;
+
+  width: uint64;
+  height: uint8;
+}
+
+root_type TreeStem;
+
+// remember that decoding keys is secondary to ordering them
+// (paired-values are already decoded)
+
+// use cockroachdb to cache TreeStem records
+// support a "lagging" replica of the "main" fork in dgraph

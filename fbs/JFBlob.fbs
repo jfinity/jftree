@@ -1,0 +1,96 @@
+// $ flatc --gen-mutable --es6-js-export --js JFBlob.fbs
+
+namespace JF.Blob; // join-fork
+
+enum BlobFlag : int32 (bit_flags) {
+  /// Key-value pair or range interval
+  Coupled = 22,
+  /// Sequential or sorted
+  Ordered = 23,
+
+  /// Collective like "Array", "Map", "Set", "Tree", "Iterable"
+  Group = 24,
+
+  /// Strings
+  Text = 25,
+
+  /// No fractional portion
+  Whole = 26,
+  /// Numbers
+  Numeric = 27,
+
+  /// Unsigned or case-insensitive
+  Unbiased = 28,
+
+  /// Reference to another value
+  Pointer = 29,
+
+  /// Does not conform to the standard -- cannot interpret
+  Freeform = 30
+}
+
+/// Intened to occupy BlobFlag bits(16..21)
+enum BlobTag : int8 {
+  /// MAX BITS
+  BITDEPTH = 6,
+
+  // shift for label -- bottom bytes are granted for custom use
+  BITSHIFT = 16,
+
+  // MAX VALUE
+  BITMASK = 63,
+}
+
+enum TagNumber : int8 {
+  /// Flag(Unbiased | Numeric | Whole)
+  UInt8 = 1,
+  /// Flag(Unbiased | Numeric | Whole)
+  UInt16 = 2,
+  /// Flag(Unbiased | Numeric | Whole)
+  UInt32 = 3,
+  /// Flag(Unbiased | Numeric | Whole)
+  UInt64 = 4,
+
+  /// Flag(Numeric | Whole)
+  Int8 = 5,
+  /// Flag(Numeric | Whole)
+  Int16 = 6,
+  /// Flag(Numeric | Whole)
+  Int32 = 7,
+  /// Flag(Numeric | Whole)
+  Int64 = 8,
+
+  /// Flag(Numeric)
+  Float32 = 9,
+  /// Flag(Numeric)
+  Float64 = 10,
+}
+
+enum TagString : int8 {
+  /// Flag(Text)
+  UTF8 = 1,
+  /// Flag(Text)
+  UTF16 = 2,
+  /// Flag(Text)
+  UTF32 = 3,
+  /// Flag(Text)
+  Unicode = 4,
+}
+
+enum TagTime : int8 {
+  /// Flag(Text)
+  Clock = 1,
+  /// Flag(Text)
+  Date = 2,
+  /// Flag(Text)
+  Moment = 3
+}
+
+enum TagUnixTime : int8 {
+  /// Flag(Unbiased | Numeric | Whole)
+  Clock = 1,
+  /// Flag(Unbiased | Numeric | Whole)
+  Date = 2,
+  /// Flag(Unbiased | Numeric | Whole)
+  Moment = 3
+}
