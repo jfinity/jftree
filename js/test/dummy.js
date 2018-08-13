@@ -31,6 +31,7 @@ function write(value, at = -1) {
   else vals[index] = value;
 
   if (!shallowArrayEqual(vals, vals.slice().sort(this._cmp))) {
+    // TODO(jfinity): sorting is "unstable" with repeated keys
     term(new Error("Sort order violation"));
   }
 
@@ -69,7 +70,7 @@ class TDummy {
     if (first < 0) return first;
     else if (skip === -1) return -total - 1 + last + 1;
     else if (skip > -1) {
-      if (first + skip > last) return -total - 1 + last;
+      if (first + skip > last) return -total - 1 + last + 1;
       else return first + skip;
     } else {
       if (last + 2 + skip < first) return -total - 1 + first;
@@ -264,8 +265,8 @@ export function* slowcheck(log = []) {
       let count = 1 + Math.max(0, 0 | extra);
 
       while (count-- > 0) {
-        real.put(key, key, 0 | skip);
-        fake.put(key, key, 0 | skip);
+        real.put(key + " : " + count, key, 0 | skip);
+        fake.put(key + " : " + count, key, 0 | skip);
       }
     },
 
@@ -335,7 +336,7 @@ export function* slowcheck(log = []) {
         );
       }
     } else {
-      log.forEach(function([task, ...rest]) {
+      log.forEach(function([task, ...rest], step) {
         if (typeof this[task] !== "function") {
           debugger;
           throw new Error("Unrecognized task: " + task);
@@ -347,11 +348,164 @@ export function* slowcheck(log = []) {
   } catch (err) {
     ok = false;
     console.log(err);
-    console.log("slowcheck(" + JSON.stringify(log) + ").next()");
+    console.log(
+      "if(slowcheck(" +
+        JSON.stringify(log) +
+        ").next().value) " +
+        "throw new Error('slowcheck');"
+    );
     debugger;
   }
 
   return ok ? null : log;
 }
 
+ENV.testsuite = testsuite;
 ENV.slowcheck = slowcheck;
+
+export function testsuite() {
+  let code = 1;
+
+  if (
+    slowcheck([
+      ["init"],
+      ["multiput", "0.1650978879438718", 3, 4],
+      ["checkAll", ["0.2563152228173142", "0.43517555519631745"]]
+    ]).next().value
+  )
+    return -code;
+  else code++;
+
+  if (
+    slowcheck([
+      ["init"],
+      ["multiput", "0.2404213606896899", -1, 4],
+      [
+        "checkAll",
+        [
+          "0.07167028614987836",
+          "0.4727861171261172",
+          "0.7754988209596645",
+          "0.00431152543992086",
+          "0.8325008668149192",
+          "0.06027714042383647",
+          "0.5703285762089434",
+          "0.23366729042251522",
+          "0.8120895485323796",
+          "0.9608243830019643",
+          "0.3806766569096032",
+          "0.02942173852731722",
+          "0.4357573005799005",
+          "0.3412187038254204"
+        ]
+      ]
+    ]).next().value
+  )
+    return -code;
+  else code++;
+
+  if (
+    slowcheck([
+      ["init"],
+      ["multiput", "0.7527321681608505", -1, 4],
+      [
+        "checkAll",
+        [
+          "0.0951791145858174",
+          "0.4873978976871194",
+          "0.36560630441127273",
+          "0.2992667154203872",
+          "0.3607301908034677",
+          "0.4213369291967277",
+          "0.7581777338535123",
+          "0.7462192893989936",
+          "0.23977938472018478",
+          "0.8851652897035507",
+          "0.11493048354873303"
+        ]
+      ],
+      ["multiput", "0.2995278606780125", -2, 0],
+      [
+        "checkAll",
+        [
+          "0.681355662828762",
+          "0.30227509884672",
+          "0.5330235189337766",
+          "0.7523493059977346",
+          "0.048769969632142196",
+          "0.29629229601866447"
+        ]
+      ],
+      ["multiput", "0.12134947113634631", -3, 0],
+      [
+        "checkAll",
+        ["0.6092590725152383", "0.4670470827340498", "0.3145644015873479"]
+      ],
+      ["multiput", "0.6235787518782054", 3, 1],
+      [
+        "checkAll",
+        [
+          "0.9927833602332687",
+          "0.40345607430025665",
+          "0.3866768152530975",
+          "0.3804200422015742",
+          "0.11867590521860949",
+          "0.5196364776580631",
+          "0.40900480591768695",
+          "0.12487104677745808",
+          "0.7979791377843202",
+          "0.01856401927417428",
+          "0.2111124985741133"
+        ]
+      ],
+      ["multiput", "0.3580675374131408", 2, 3],
+      [
+        "checkAll",
+        ["0.8952605275287375", "0.9272711028119334", "0.38503463987884445"]
+      ],
+      ["multiput", "0.9938487664839455", 1, 0],
+      [
+        "checkAll",
+        [
+          "0.4464955613654531",
+          "0.779730271081801",
+          "0.29137326199582114",
+          "0.34938010162661426"
+        ]
+      ],
+      ["multiput", "0.4361097942881378", 0, 0],
+      [
+        "checkAll",
+        [
+          "0.973786448407653",
+          "0.04840726463160583",
+          "0.7339301026825891",
+          "0.15357494317806597",
+          "0.9148806950388779"
+        ]
+      ],
+      ["multiput", "0.1059101194753791", 0, 1],
+      [
+        "checkAll",
+        [
+          "0.5808739720652676",
+          "0.12219508216943309",
+          "0.7051144745473603",
+          "0.601547718509174",
+          "0.27033524290069466",
+          "0.2604824417133924",
+          "0.672320506710262",
+          "0.18908609114487285",
+          "0.09044884680281107",
+          "0.46514090107006956",
+          "0.0849576348478247",
+          "0.18118197341253062"
+        ]
+      ]
+    ]).next().value
+  )
+    return -code;
+  else code++;
+
+  return 0;
+}

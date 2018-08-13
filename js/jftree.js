@@ -381,16 +381,19 @@ class TTrunk {
   _onset(key = "", skip = 0, root = this._root) {
     const total = this._measure(this._root);
     const move = clampTo(-total - 1, total, skip);
-    const first = move === -1 ? -total - 1 : this._find(key, root);
-    const last = move === 0 ? -total - 1 : this._locate(key, root);
+    const first = this._find(key, root);
+    const last = first < 0 ? first : this._locate(key, root);
 
-    const at = move < 0 ? last + 1 + move : first + move;
-
-    if (at < first) return -total - 1 + first;
-    else if (at < 0) return first > last ? first : last;
-    else if (last < 0) return at;
-    else if (at > last) return -total - 1 + last;
-    else return at;
+    if (first < 0) return first;
+    else if (last < 0) return last;
+    else if (move === -1) return -total - 1 + last + 1;
+    else if (move > -1) {
+      if (first + move > last) return -total - 1 + last + 1;
+      else return first + move;
+    } else {
+      if (last + 2 + move < first) return -total - 1 + first;
+      else return last + 2 + move;
+    }
   }
 
   offsetOf(key = "", skip = 0) {
@@ -509,7 +512,7 @@ class TTrunk {
     } else if (skip < 0) {
       const total = this._measure(this._root);
 
-      this._vals = this._write(value, -total - 1 + at, this._root, this._max);
+      this._root = this._write(value, -total - 1 + at, this._root, this._max);
     } else {
       this._root = this._write(value, at, this._root, this._max);
     }
