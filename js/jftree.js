@@ -1,6 +1,3 @@
-import { JF as FBSTree } from "./JFTree_generated.js";
-import { JF as FBSBlob } from "./JFBlob_generated.js";
-
 // Join-Fork Tree
 
 const ENV = (that => this || that)(
@@ -15,1010 +12,643 @@ function POLYFILL({ fbs = LIB.fbs } = LIB) {
   LIB.fbs = fbs;
 }
 
-const { Tree: JFTree } = FBSTree;
-const { Blob: JFBlob } = FBSBlob;
-
-const { BlobFlag, BlobTag, TagNumber, TagString } = JFBlob;
-
-const Sequence = BlobFlag.Ordered | BlobFlag.Group;
-
-const Float = BlobFlag.Numeric;
-const Int = BlobFlag.Numeric | BlobFlag.Whole;
-const UInt = BlobFlag.Unbiased | BlobFlag.Numeric | BlobFlag.Whole;
-
-const Vector = {
-  UInt: {
-    8: UInt | (TagNumber.UInt8 << BlobTag.BITSHIFT) | Sequence,
-    16: UInt | (TagNumber.UInt16 << BlobTag.BITSHIFT) | Sequence,
-    32: UInt | (TagNumber.UInt32 << BlobTag.BITSHIFT) | Sequence,
-    64: UInt | (TagNumber.UInt64 << BlobTag.BITSHIFT) | Sequence
-  },
-
-  Int: {
-    8: Int | (TagNumber.Int8 << BlobTag.BITSHIFT) | Sequence,
-    16: Int | (TagNumber.Int16 << BlobTag.BITSHIFT) | Sequence,
-    32: Int | (TagNumber.Int32 << BlobTag.BITSHIFT) | Sequence,
-    64: Int | (TagNumber.Int64 << BlobTag.BITSHIFT) | Sequence
-  },
-
-  Float: {
-    32: Float | (TagNumber.Float32 << BlobTag.BITSHIFT) | Sequence,
-    64: Float | (TagNumber.Float64 << BlobTag.BITSHIFT) | Sequence
-  }
-};
-
-const Unit = {
-  UTF8: BlobFlag.Text | (TagString.UTF8 << BlobTag.BITSHIFT)
-};
+const naturalCollation = { locales: undefined, options: undefined };
 
 const codecE = new TextEncoder();
 const codecD = new TextDecoder();
 
-const INIT_BRANCH_BSIZE = 1024;
-const INIT_LEAF_BSIZE = 2048;
+const LEAF_HEIGHT = 0;
 
 const MIN_SIZE = 1 << 3;
 const MAX_SIZE = (MIN_SIZE << 1) - 1;
 
-function sumWidths(totals, node, index) {
-  const subtotal = index ? totals[index - 1] : 0;
-  totals.push(subtotal + node.stem.width().toFloat64());
-  return totals;
-}
-
-class TreeNode {
-  constructor(raw = new Uint8Array([]), nodes = null) {
-    const { fbs } = LIB;
-    const { TreeStem } = JFTree;
-
-    this.raw = raw;
-    this.stem = TreeStem.getRootAsTreeStem(new fbs.ByteBuffer(raw));
-
-    this.nodes = Array.isArray(nodes) ? nodes : null;
-    this.totals = !this.nodes ? null : this.nodes.reduce(sumWidths, []);
-  }
+function TJoint(version, basis, series) {
+  return {
+    version: +version || 0,
+    basis: +basis || 0,
+    series: series || ""
+  };
 }
 
 function bisect(count) {
   return (count >> 1) + 1;
 }
 
-function placeOf(at, node) {
-  const count = at < 0 ? node.totals.length : 0;
+function clampTo(lower, upper, index) {
+  if (index < lower) return lower;
+  else if (index > upper) return upper;
+  else return index;
+}
+
+function placeOfIndex(at, stem) {
+  // TODO(jfinity): benchmark with binary search
+  const count = at < 0 ? 0 : stem.offsets.length;
 
   for (let index = 0; index < count; index += 1) {
-    if (at < node.totals[index]) {
+    if (at < stem.offsets[index]) {
       return index;
     }
+  }
+
+  return at < 0 ? -2 : -1;
+}
+
+function ascendKey(key, stem) {
+  // TODO(jfinity): benchmark with binary search
+  const { locales, options } = stem.collation || naturalCollation;
+  const count = stem.stems ? stem.stems.length : stem.vals.length;
+
+  for (let index = 0; index < count; index += 1) {
+    const found = stem.stems ? stem.stems[index].upper : stem.vals[index].key;
+    const bias = key.localeCompare(found, locales, options);
+
+    if (bias > 0) continue;
+    else return index;
   }
 
   return -1;
 }
 
-function moduLong(low, high) {
-  const { fbs } = LIB;
-  let remainder = low;
-  let quotient = high;
+function descendKey(key, stem) {
+  // TODO(jfinity): benchmark with binary search
+  const { locales, options } = stem.collation || naturalCollation;
+  const count = stem.stems ? stem.stems.length : stem.vals.length;
 
-  while (remainder < 0) {
-    remainder += ~0 >>> 0;
-    quotient -= 1;
+  for (let index = count; index-- > 0; ) {
+    const found = stem.stems ? stem.stems[index].lower : stem.vals[index].key;
+    const bias = key.localeCompare(found, locales, options);
+
+    if (bias < 0) continue;
+    else return index;
   }
 
-  while (remainder > ~0 >>> 0) {
-    remainder -= ~0 >>> 0;
-    quotient += 1;
-  }
-
-  return fbs.Long.create(remainder, quotient);
+  return -2;
 }
 
-function assembleUbytesBlob(builder, ubytes) {
-  const { TreeDatum } = JFTree;
-
-  return TreeDatum.createBlobVector(builder, ubytes);
-}
-
-function assembleBufferBlob(builder, buffer, offset, size) {
-  const { TreeDatum } = JFTree;
-
-  return TreeDatum.createBlobVector(
-    builder,
-    new Uint8Array(buffer, offset, size)
-  );
-}
-
-function assembleViewBlob(builder, view) {
-  return assembleBufferBlob(
-    builder,
-    view.buffer,
-    view.byteOffset,
-    view.byteLength
-  );
-}
-
-function assembleArrayBlob(builder, list, flag) {
-  if (0 === (flag & BlobFlag.Freeform)) {
-    switch (flag) {
-      case Vector.UInt[8]:
-        return assembleUbytesBlob(builder, list);
-      case Vector.Int[8]:
-        return assembleViewBlob(builder, new Int8Array(list));
-
-      case Vector.UInt[16]:
-        return assembleViewBlob(builder, new Uint16Array(list));
-      case Vector.Int[16]:
-        return assembleViewBlob(builder, new Int16Array(list));
-
-      case Vector.UInt[32]:
-        return assembleViewBlob(builder, new Uint32Array(list));
-      case Vector.Int[32]:
-        return assembleViewBlob(builder, new Int32Array(list));
-
-      case Vector.Float[32]:
-        return assembleViewBlob(builder, new Float32Array(list));
-      case Vector.Float[64]:
-        return assembleViewBlob(builder, new Float64Array(list));
-      default:
-        break;
-    }
-  }
-
-  if (list.every(Number.isInteger)) {
-    const min = list.reduce(Math.min, 0);
-    const max = list.reduce(Math.max, 0);
-    const abs = -(min + 1) < max ? max : -(min + 1);
-    const sign = min < 0 ? 1 : 0;
-
-    if (abs < 0xff >>> sign) {
-      return sign
-        ? assembleViewBlob(builder, new Int8Array(list))
-        : assembleUbytesBlob(builder, list);
-    } else if (abs < 0xffff >>> sign) {
-      return sign
-        ? assembleViewBlob(builder, new Int16Array(list))
-        : assembleUbytesBlob(builder, new Uint16Array(list));
-    } else if (abs < 0xffffffff >>> sign) {
-      return sign
-        ? assembleViewBlob(builder, new Int32Array(list))
-        : assembleUbytesBlob(builder, new Uint32Array(list));
-    } else {
-      return assembleViewBlob(builder, new Float64Array(list));
-    }
-  } else {
-    return assembleViewBlob(builder, new Float64Array(list));
-  }
-}
-
-function assembleTextBlob(builder, text) {
-  const { TreeDatum } = JFTree;
-
-  return TreeDatum.createBlobVector(builder, codecE.encode(text));
-}
-
-function assembleBlob(builder, blob, flag) {
-  if (blob instanceof Uint8Array) {
-    return assembleUbytesBlob(builder, blob);
-  } else if (ArrayBuffer.isView(blob)) {
-    return assembleViewBlob(builder, blob);
-  } else if (Array.isArray(blob)) {
-    return assembleArrayBlob(builder, blob, flag);
-  } else if ("string" === typeof blob) {
-    return assembleTextBlob(builder, blob);
-  } else if (blob instanceof ArrayBuffer) {
-    return assembleBufferBlob(builder, blob);
-  } else {
-    throw new Error(`Unresolved blob value: ${blob}`);
-  }
-}
-
-function determineArrayBlobFlag(list) {
-  if (list.every(Number.isInteger)) {
-    const min = list.reduce(Math.min, 0);
-    const max = list.reduce(Math.max, 0);
-    const abs = -(min + 1) < max ? max : -(min + 1);
-    const sign = min < 0 ? 1 : 0;
-
-    if (abs < 0xff >>> sign) {
-      return sign ? Vector.Int[8] : Vector.UInt[8];
-    } else if (abs < 0xffff >>> sign) {
-      return sign ? Vector.Int[16] : Vector.UInt[16];
-    } else if (abs < 0xffffffff >>> sign) {
-      return sign ? Vector.Int[32] : Vector.UInt[32];
-    } else {
-      return Vector.Float[64];
-    }
-  } else {
-    return Vector.Float[64];
-  }
-}
-
-function determineViewBlobFlag(name) {
-  switch (name) {
-    case "Uint8ClampedArray":
-    case "Uint8Array":
-      return Vector.UInt8;
-    case "Uint16Array":
-      return Vector.UInt16;
-    case "Uint32Array":
-      return Vector.UInt32;
-    case "Int8Array":
-      return Vector.Int8;
-    case "Int16Array":
-      return Vector.Int16;
-    case "Int32Array":
-      return Vector.Int32;
-    case "Float32Array":
-      return Vector.Float32;
-    case "Float64Array":
-      return Vector.Float64;
+function normalize(key) {
+  switch (typeof key) {
+    case "string":
+      return key;
+    case "number":
+      return key.toString();
     default:
-      throw new Error(`Unrecognized view name: ${name}`);
+      throw new Error(`Failed to normalize key: ${key}`);
   }
 }
 
-function determineBlobFlag(blob) {
-  if (ArrayBuffer.isView(blob)) {
-    return determineViewBlobFlag(blob.constructor.name);
-  } else if (Array.isArray(blob)) {
-    return determineArrayBlobFlag(blob);
-  } else if ("string" === typeof blob) {
-    return Unit.UTF8;
-  } else if (blob instanceof ArrayBuffer) {
-    return Sequence;
-  } else {
-    return 0;
-  }
+function TVal(key, data, joint) {
+  return {
+    key: normalize(key) || "",
+    data: data,
+    joint: joint || null
+  };
 }
 
-function assembleDatum(builder, tag, label, blob) {
-  const { TreeDatum } = JFTree;
-
-  const flag = tag & BlobFlag.Freeform || determineBlobFlag(blob);
-  const bOffset = assembleBlob(builder, blob, flag);
-  const lOffset = label ? builder.createString(label) : 0;
-
-  TreeDatum.startTreeDatum(builder);
-
-  TreeDatum.addTag(builder, tag | flag);
-
-  if (label) {
-    TreeDatum.addLabel(builder, lOffset);
-  }
-
-  TreeDatum.addBlob(bOffset);
-
-  return endTreeDatum(builder);
+function isLeafy(branch) {
+  return !branch.stems;
 }
 
-function replicateDatum(builder, datum) {
-  const label = datum.label() || "";
-  return assembleDatum(builder, datum.tag(), label, datum.blobArray());
+function sumLeaves(offsets, stem, index) {
+  const width = stem.vals.length;
+  const total = index ? offsets[index - 1] : 0;
+
+  offsets.push(total + width);
+
+  return offsets;
 }
 
-function assembleStem(builder, keys, vals, refs, prior, next, width, height) {
-  const { fbs } = LIB;
-  const { Unique, TreeStem } = JFTree;
+function sumBranches(offsets, stem, index) {
+  const count = stem.offsets.length;
+  const width = count ? stem.offsets[count - 1] : 0;
+  const total = index ? offsets[index - 1] : 0;
 
-  TreeStem.startTreeStem(builder);
+  offsets.push(total + width);
 
-  TreeStem.addUnique(
-    builder,
-    Unique.createUnique(builder, fbs.Long.create(0, 0), fbs.Long.create(0, 0))
-  );
-  TreeStem.addKeys(builder, keys);
-  TreeStem.addVals(builder, vals);
-  TreeStem.addRefs(builder, refs);
-  TreeStem.addPrior(builder, prior);
-  TreeStem.addNext(builder, next);
-  TreeStem.addCommit(builder, fbs.Long.create(0, 0));
-  TreeStem.addMerge(builder, fbs.Long.create(0, 0));
-  TreeStem.addWidth(builder, width);
-  TreeStem.addHeight(builder, height);
-
-  return TreeStem.endTreeStem(builder);
+  return offsets;
 }
 
-function growLeaf(bsize = 0) {
-  const { fbs } = LIB;
-  const { TreeStem } = JFTree;
+function TStem(height, collation, stems, vals, joint, ego, gauges) {
+  const limit = vals ? vals.length : 0;
+  const amount = stems ? stems.length : 0;
 
-  const builder = new fbs.Builder(bsize);
+  return {
+    height: height || LEAF_HEIGHT,
 
-  const height = 0;
+    collation: collation || null,
 
-  const keys = TreeStem.createKeysVector(builder, []);
+    lower: stems
+      ? (amount || null) && stems[0].lower
+      : (limit || null) && vals[0].key,
+    upper: stems
+      ? (amount || null) && stems[amount - 1].upper
+      : (limit || null) && vals[limit - 1].key,
 
-  const vals = TreeStem.createValsVector(builder, []);
+    vals: vals || null,
+    stems: stems || null,
+    offsets: stems
+      ? stems.reduce(!stems.every(isLeafy) ? sumBranches : sumLeaves, [])
+      : null,
 
-  TreeStem.startRefsVector(builder, 0);
-  const refs = builder.endVector();
-
-  builder.finish(
-    assembleStem(
-      builder,
-      keys,
-      vals,
-      refs,
-      builder.createString(""),
-      builder.createString(""),
-      fbs.Long.create(0, 0),
-      height
-    )
-  );
-
-  return new TreeNode(builder.asUint8Array(), null);
+    ego: ego || "",
+    joint: joint || null,
+    gauges: gauges || null
+  };
 }
 
-function growRoot(lower, upper, bsize = 0) {
-  const { fbs } = LIB;
-  const { Unique, TreeStem } = JFTree;
+function lSlicePart(stem, begin, end, joint) {
+  const { height, collation, vals } = stem;
+  const list = vals.slice(begin, end);
 
-  const builder = new fbs.Builder(bsize);
-
-  const height =
-    lower.stem.height() > upper.stem.height()
-      ? lower.stem.height() + 1
-      : upper.stem.height() + 1;
-
-  const keys = TreeStem.createKeysVector(builder, [
-    builder.createString(lower.stem.keys(0)),
-    builder.createString(upper.stem.keys(0))
-  ]);
-
-  const vals = TreeStem.createValsVector(builder, []);
-
-  TreeStem.startRefsVector(builder, 2);
-  Unique.createUnique(
-    builder,
-    lower.stem.unique().instance(),
-    lower.stem.unique().allocator()
-  );
-  Unique.createUnique(
-    builder,
-    upper.stem.unique().instance(),
-    upper.stem.unique().allocator()
-  );
-  const refs = builder.endVector();
-
-  builder.finish(
-    assembleStem(
-      builder,
-      keys,
-      vals,
-      refs,
-      builder.createString(""),
-      builder.createString(""),
-      moduLong(
-        lower.stem.width().low + upper.stem.width().low,
-        lower.stem.width().high + upper.stem.width().high
-      ),
-      height
-    )
-  );
-
-  return new TreeNode(builder.asUint8Array(), [lower, upper]);
+  return TStem(height, collation, null, list, joint, "", null);
 }
 
-function sliceInsertVals(builder, model, place, limit, at, tag, label, blob) {
-  const { TreeStem, TreeDatum } = JFTree;
+function lSliceSet(stem, begin, end, index, value) {
+  const { height, collation, vals } = stem;
+  const middle = clampTo(0, vals.length - 1, index);
+  const list = vals.slice(begin, end);
 
-  const datum = new TreeDatum();
-  const vals = [];
+  list[middle] = value;
 
-  for (let index = place; index < at; index += 1) {
-    vals.push(replicateDatum(model.vals(index, datum)));
-  }
-
-  {
-    vals.push(assembleDatum(builder, tag, label, blob));
-  }
-
-  for (let index = at; index < limit; index += 1) {
-    vals.push(replicateDatum(model.vals(index, datum)));
-  }
-
-  return TreeStem.createValsVector(builder, vals);
+  return TStem(height, collation, null, list, value.joint, "", null);
 }
 
-function sliceInsertKeys(builder, model, place, limit, at, key) {
-  const { TreeStem } = JFTree;
+function lSliceInsert(stem, begin, end, index, value) {
+  const { height, collation, vals } = stem;
+  const middle = clampTo(0, vals.length, index);
+  const list = [];
 
-  const keys = [];
+  for (let at = begin; at < middle; at += 1) list.push(vals[at]);
 
-  for (let index = place; index < at; index += 1) {
-    keys.push(builder.createString(model.keys(index)));
-  }
+  list.push(value);
 
-  {
-    keys.push(builder.createString(key));
-  }
+  for (let at = middle; at < end; at += 1) list.push(vals[at]);
 
-  for (let index = at; index < limit; index += 1) {
-    keys.push(builder.createString(model.keys(index)));
-  }
-
-  return TreeStem.createKeysVector(builder, keys);
+  return TStem(height, collation, null, list, value.joint, "", null);
 }
 
-function lSliceInsert(builder, model, place, limit, at, key, tag, label, blob) {
-  return assembleStem(
-    builder,
-    sliceInsertKeys(builder, model, place, limit, at, key),
-    sliceInsertVals(builder, model, place, limit, at, tag, label, blob),
-    sliceRefs(builder, model, -1, -1),
-    builder.createString(model.prior()),
-    builder.createString(model.next()),
-    model.width(),
-    model.height()
-  );
-}
+function includeLeaf(at, nodes, value) {
+  const count = nodes.original.vals.length;
 
-function chainNext(next, front) {
-  const { fbs } = LIB;
-
-  const bsize = 2 * front.raw.length;
-  const amount = Array.isArray(front.nodes) ? front.nodes.length : 0;
-
-  if (amount === 0) {
-    const builder = new fbs.Builder(bsize);
-
-    builder.finish(copyLeafWithNext(builder, front.stem, next));
-
-    return new TreeNode(builder.asUint8Array(), null);
-  } else {
-    const child = chainNext(next, front.nodes[amount - 1]);
-    const list = front.nodes.slice();
-
-    const builder = new fbs.Builder(bsize);
-
-    builder.finish(copyBranchWithNext(builder, front.stem, next, child));
-
-    list[amount - 1] = child;
-
-    return new TreeNode(builder.asUint8Array(), list);
-  }
-}
-
-function chainPrior(prior, rear) {
-  const { fbs } = LIB;
-
-  const bsize = 2 * rear.raw.length;
-  const amount = Array.isArray(rear.nodes) ? rear.nodes.length : 0;
-
-  if (amount === 0) {
-    const builder = new fbs.Builder(bsize);
-
-    builder.finish(copyLeafWithPrior(builder, rear.stem, prior));
-
-    return new TreeNode(builder.asUint8Array(), null);
-  } else {
-    const child = chainPrior(prior, rear.nodes[0]);
-    const list = rear.nodes.slice();
-
-    const builder = new fbs.Builder(bsize);
-
-    builder.finish(copyBranchWithPrior(builder, rear.stem, prior, child));
-
-    list[0] = child;
-
-    return new TreeNode(builder.asUint8Array(), list);
-  }
-}
-
-function includeLeaf(place, nodes, key, tag, label, blob, bsize = 0) {
-  const { fbs } = LIB;
-
-  const { original } = nodes;
-  const model = original.stem;
-  const count = model.keysLength();
-
-  const builder = new fbs.Builder(bsize);
-
-  builder.finish(
-    lSliceInsert(builder, model, 0, count, place, key, tag, label, blob)
-  );
-
-  nodes.lower = new TreeNode(builder.asUint8Array(), null);
+  nodes.lower = lSliceSet(nodes.original, 0, count, at, value);
   nodes.upper = nodes.lower;
 }
 
-function includeLessLeaf(place, nodes, key, tag, label, blob, bsize = 0) {
-  const { fbs } = LIB;
+function includeExtraLeaf(at, nodes, value) {
+  const count = nodes.original.vals.length;
 
-  const { original } = nodes;
-  const model = original.stem;
-  const count = model.keysLength();
-  const split = bisect(count);
-  const prior = place === split - 1 ? key : model.keys(split - 1);
-
-  const former = new fbs.Builder(bsize);
-  const latter = new fbs.Builder(bsize);
-
-  former.finish(
-    lSliceInsert(former, model, 0, split, place, key, tag, label, blob)
-  );
-
-  latter.finish(sliceLeavesWithPrior(latter, model, split, count, prior));
-
-  nodes.lower = new TreeNode(former.asUint8Array(), null);
-  nodes.upper = new TreeNode(latter.asUint8Array(), null);
-}
-
-function includeMoreLeaf(place, nodes, key, tag, label, blob, bsize = 0) {
-  const { fbs } = LIB;
-
-  const { original } = nodes;
-  const model = original.stem;
-  const count = model.keysLength();
-  const split = bisect(count);
-  const next = place === split ? key : model.keys(split);
-
-  const former = new fbs.Builder(bsize);
-  const latter = new fbs.Builder(bsize);
-
-  former.finish(sliceLeavesWithNext(former, model, 0, split, next));
-
-  latter.finish(
-    lSliceInsert(latter, model, split, count, place, key, tag, label, blob)
-  );
-
-  nodes.lower = new TreeNode(former.asUint8Array(), null);
-  nodes.upper = new TreeNode(latter.asUint8Array(), null);
-}
-
-function includeBranch(place, nodes, bsize = 0) {
-  const { fbs } = LIB;
-
-  const { original, lower, before, after } = nodes;
-  const model = original.stem;
-  const count = original.nodes.length;
-
-  const first = [];
-
-  const builder = new fbs.Builder(bsize);
-
-  builder.finish(
-    sliceSetBranches(
-      builder,
-      model,
-      0,
-      count,
-      place,
-      lower,
-      before,
-      after,
-      original.nodes,
-      first
-    )
-  );
-
-  nodes.lower = new TreeNode(builder.asUint8Array(), first);
+  nodes.lower = lSliceInsert(nodes.original, 0, count, at, value);
   nodes.upper = nodes.lower;
 }
 
-function includeDualBranch(place, nodes, bsize = 0) {
-  const { fbs } = LIB;
+function includeLessLeaf(at, nodes, value) {
+  const size = nodes.original.vals.length;
+  const half = bisect(size);
 
-  const { original, lower, upper, before, after } = nodes;
-  const model = original.stem;
-  const count = original.nodes.length;
+  nodes.lower = lSliceInsert(nodes.original, 0, half, at, value);
+  nodes.upper = lSlicePart(nodes.original, half, size, value.joint);
+}
 
-  const first = [];
+function includeMoreLeaf(at, nodes, value) {
+  const size = nodes.original.vals.length;
+  const half = bisect(size);
 
-  const builder = new fbs.Builder(bsize);
+  nodes.lower = lSlicePart(nodes.original, 0, half, value.joint);
+  nodes.upper = lSliceInsert(nodes.original, half, size, at, value);
+}
 
-  builder.finish(
-    sliceInsertBranches(
-      builder,
-      model,
-      0,
-      count,
-      place,
-      lower,
-      upper,
-      before,
-      after,
-      original.nodes,
-      first
-    )
-  );
+function bSliceSet(parent, begin, end, index, node) {
+  const { height, collation, stems } = parent;
+  const list = stems.slice(begin, end);
 
-  nodes.lower = new TreeNode(builder.asUint8Array(), first);
+  list[index] = node;
+
+  return TStem(height, collation, list, null, node.joint, "", null);
+}
+
+function bSliceInsert(parent, begin, end, index, younger, older) {
+  const { height, collation, stems } = parent;
+  const list = [];
+
+  for (let at = begin; at < index; at += 1) list.push(stems[at]);
+
+  list.push(younger);
+  list.push(older);
+
+  for (let at = index; at < end; at += 1) list.push(stems[at]);
+
+  return TStem(height, collation, list, null, younger.joint, "", null);
+}
+
+function includeBranch(place, nodes) {
+  const { original, lower } = nodes;
+  const count = original.stems.length;
+
+  nodes.lower = bSliceSet(original, 0, count, place, lower);
   nodes.upper = nodes.lower;
 }
 
-function includeEqualBranch(place, nodes, bsize = 0) {
-  const { fbs } = LIB;
+function includeExtraBranch(place, nodes) {
+  const { original, lower, upper } = nodes;
+  const count = original.stems.length;
 
-  const { original, lower, upper, before, after } = nodes;
-  const model = original.stem;
-  const count = original.nodes.length;
-
-  const first = [];
-  const second = [];
-
-  const former = new fbs.Builder(bsize);
-  const latter = new fbs.Builder(bsize);
-
-  former.finish(
-    sliceSetBranches(
-      former,
-      model,
-      0,
-      place + 1,
-      place,
-      lower,
-      before,
-      null,
-      original.nodes,
-      first
-    )
-  );
-
-  latter.finish(
-    sliceSetBranches(
-      latter,
-      model,
-      count - place - 1,
-      count,
-      count - place - 1,
-      upper,
-      null,
-      after,
-      original.nodes,
-      second
-    )
-  );
-
-  nodes.lower = new TreeNode(former.asUint8Array(), first);
-  nodes.upper = new TreeNode(latter.asUint8Array(), upper);
+  nodes.lower = bSliceInsert(original, 0, count, place, lower, upper);
+  nodes.upper = nodes.lower;
 }
 
-function includeLessBranch(place, nodes, bsize = 0) {
-  const { fbs } = LIB;
+function includeDualBranch(place, nodes) {
+  const { original, lower, upper } = nodes;
+  const count = original.stems.length;
+  const index = count - place - 1;
 
-  const { original, lower, upper, before, after } = nodes;
-  const model = original.stem;
-  const count = original.nodes.length;
+  nodes.lower = bSliceSet(original, 0, place + 1, place, lower);
+  nodes.upper = bSliceSet(original, index, count, index, upper);
+}
+
+function includeLessBranch(place, nodes) {
+  const { original, lower, upper } = nodes;
+  const count = original.stems.length;
   const split = bisect(count);
 
-  const first = [];
-  const second = [];
-
-  const former = new fbs.Builder(bsize);
-  const latter = new fbs.Builder(bsize);
-
-  former.finish(
-    sliceInsertBranches(
-      former,
-      model,
-      0,
-      split,
-      place,
-      lower,
-      upper,
-      before,
-      after,
-      original.nodes,
-      first
-    )
-  );
-
-  latter.finish(
-    sliceSetBranches(
-      latter,
-      model,
-      split,
-      count,
-      place,
-      upper,
-      null,
-      after,
-      original.nodes,
-      second
-    )
-  );
-
-  nodes.lower = new TreeNode(former.asUint8Array(), first);
-  nodes.upper = new TreeNode(latter.asUint8Array(), second);
+  nodes.lower = bSliceInsert(original, 0, split, place, lower, upper);
+  nodes.upper = bSliceSet(original, split, count, place, upper);
 }
 
-function includeMoreBranch(place, nodes, bsize = 0) {
-  const { fbs } = LIB;
-
-  const { original, lower, upper, before, after } = nodes;
-  const model = original.stem;
-  const count = original.nodes.length;
+function includeMoreBranch(place, nodes) {
+  const { original, lower, upper } = nodes;
+  const count = original.stems.length;
   const split = bisect(count);
 
-  const first = [];
-  const second = [];
-
-  const former = new fbs.Builder(bsize);
-  const latter = new fbs.Builder(bsize);
-
-  former.finish(
-    sliceSetBranches(
-      former,
-      model,
-      0,
-      split,
-      place,
-      lower,
-      before,
-      null,
-      original.nodes,
-      first
-    )
-  );
-
-  latter.finish(
-    sliceInsertBranches(
-      latter,
-      model,
-      split,
-      count,
-      place,
-      lower,
-      upper,
-      before,
-      after,
-      original.nodes,
-      second
-    )
-  );
-
-  nodes.lower = new TreeNode(former.asUint8Array(), first);
-  nodes.upper = new TreeNode(latter.asUint8Array(), second);
+  nodes.lower = bSliceSet(original, 0, split, place, lower);
+  nodes.upper = bSliceInsert(original, split, count, place, lower, upper);
 }
 
-class TreeTrunk {
-  constructor(
-    root = null,
-    min = MIN_SIZE,
-    max = MAX_SIZE,
-    leafsize = INIT_LEAF_BSIZE,
-    branchsize = INIT_BRANCH_BSIZE
-  ) {
-    const floor = min < max ? min : max;
-    const ceil = max > min ? max : min;
+function growLeaf(collation = null, val = null, joint = null) {
+  const height = LEAF_HEIGHT;
+
+  return TStem(height, collation, null, val ? [val] : [], joint, "", null);
+}
+
+function growRoot(root, stems, joint = null) {
+  const { height, collation } = root;
+  const list =
+    stems && stems.length ? stems : [growLeaf(collation, null, joint)];
+
+  return TStem(height + 1, collation, list, null, joint, "", null);
+}
+
+class TTrunk {
+  constructor(root, collation, min, max) {
+    const { locales, options } =
+      (root ? root.collation : collation) || naturalCollation;
+
+    const floor = 0 | (min < 0) | max ? 0 | min : 0 | max;
+    const ceil = 0 | (max > 0) | min ? 0 | max : 0 | min;
 
     this._min = floor < 1 ? MIN_SIZE : floor;
     this._max = ceil < 2 ? MAX_SIZE : ceil;
 
-    this._leafsize = leafsize < 0 ? INIT_LEAF_BSIZE : branchsize;
-    this._branchsize = branchsize < 0 ? INIT_BRANCH_BSIZE : branchsize;
-
-    this._root = root || growLeaf(this._leafsize);
+    this._root =
+      root || growLeaf(collation ? { locales, options } : null, null, null);
   }
 
-  rebase(origin) {
-    // TODO(jfinity): implement merge behavior
-  }
-
-  join(origin) {
-    // TODO(jfinity): implement merge behavior
-  }
-
-  fork() {
-    return new TreeTrunk(
-      this._root,
-      this._min,
-      this._max,
-      this._leafsize,
-      this._branchsize
-    );
-  }
-
-  size(root = this._root) {
-    return root.stem.height() < 1
-      ? root.stem.keysLength()
-      : root.totals[root.totals.length - 1];
+  toJSON() {
+    return {
+      min: this._min,
+      max: this._max,
+      root: this._root || null
+    };
   }
 
   encode(text = "") {
-    return codecE.encode(text);
+    return codecE.encode.apply(codecE, arguments);
   }
 
-  decode(blob = new Uint8Array([])) {
-    return codecD.decode(blob);
+  decode(data = new Uint8Array()) {
+    return codecD.decode.apply(codecD, arguments);
   }
 
-  valueOf(index = -1, root = this._root) {
-    return this._read(index, root);
+  wrap(root = this._root) {
+    const node = this._root;
+
+    this._root = root || node;
+
+    return node;
   }
 
-  get(key = "", skip = -1, root = this._root) {
-    const index = this.head(key, skip, root);
-
-    return index < 0 ? undefined : this._read(index, root);
+  _measure(root = this._root) {
+    return isLeafy(root)
+      ? root.vals.length
+      : root.offsets[root.offsets.length - 1];
   }
 
-  _read(at = -1, root = this._root) {
-    // output blob
+  size() {
+    return this._measure(this._root);
   }
 
-  options(key = "", skip = -1, root = this._root) {
-    // output blob "label-tag"
-  }
+  _search(key = "", node = this._root, descending = false) {
+    if (isLeafy(node)) {
+      const limit = node.vals.length;
+      const temp = descending ? descendKey(key, node) : ascendKey(key, node);
 
-  indexOf(key = "", root = this._root) {
-    return this._find(key, root);
-  }
-
-  lastIndexOf(key = "", root = this._root) {
-    return this._locate(key, root);
-  }
-
-  head(key = "", skip = -1, root = this._root) {
-    const front = skip === -1 ? -1 : this._find(key, root);
-    const back = skip === 0 ? -1 : this._locate(key, root);
-
-    const at = skip < 0 ? back + 1 + skip : front + skip;
-
-    // handle negative back/front
-
-    return at < front ? front : at < back || back < 0 ? at : back;
-  }
-
-  _find(key = "", root = this._root) {
-    // _find first
-  }
-
-  _locate(key = "", root = this._root) {
-    // _locate last
-  }
-
-  _add(tag, label, blob, key, at, nodes, defer) {
-    const { original, before, after } = nodes;
-
-    if (original.stem.height() < 1) {
-      const place = at;
-
-      const count = original.stem.keysLength();
-
-      if (count < this._max) {
-        includeLeaf(place, nodes, key, tag, label, blob, this._leafsize);
-      } else if (place < bisect(count)) {
-        includeLessLeaf(place, nodes, key, tag, label, blob, this._leafsize);
-      } else {
-        includeMoreLeaf(place, nodes, key, tag, label, blob, this._leafsize);
-      }
+      if (temp < 0) return temp === -1 ? -1 : -limit - 1;
+      else if (key === node.vals[temp].key) return temp;
+      else return descending ? -limit - 1 + temp + 1 : -limit - 1 + temp;
     } else {
-      const place = placeOf(at, original);
+      const limit = node.offsets.length;
+      const temp = descending ? descendKey(key, node) : ascendKey(key, node);
+      const at = temp === -1 ? limit : clampTo(0, limit - 1, temp);
+      const index =
+        at < limit
+          ? this._search(key, node.stems[at], descending)
+          : -node.offsets[at];
 
-      const index = place > 0 ? at - original.totals[place - 1] : at - 0;
-      const fasten = index === 0 || at === original.totals[place];
-
-      nodes.original = original.nodes[place];
-      nodes.before = place ? original.nodes[place - 1] : null;
-      nodes.after =
-        place < original.node.length - 1 ? original.nodes[place + 1] : null;
-      nodes.lower = null;
-      nodes.upper = null;
-
-      this._add(tag, label, blob, key, index, nodes, defer || fasten);
-
-      nodes.original = original;
-      nodes.before = before;
-      nodes.after = after;
-
-      if (!defer && fasten) {
-        if (index === 0) {
-          nodes.before = chainNext(nodes.lower.stem.keys(0), before);
-        } else {
-          nodes.after = chainPrior(
-            nodes.upper.stem.keys(nodes.upper.stem.keysLength() - 1),
-            after
-          );
-        }
-      }
-
-      const count = original.totals.length;
-
-      if (nodes.lower === nodes.upper) {
-        includeBranch(place, nodes, this._branchsize);
-      } else if (count < this._max) {
-        includeDualBranch(place, nodes, this._branchsize);
-      } else if (place === bisect(count) - 1) {
-        includeEqualBranch(place, nodes, this._branchsize);
-      } else if (place < bisect(count)) {
-        includeLessBranch(place, nodes, this._branchsize);
-      } else {
-        includeMoreBranch(place, nodes, this._branchsize);
-      }
+      if (index > -1) return at > 0 ? node.offsets[at - 1] + index : index;
+      else if (at >= limit) return -node.offsets[limit - 1] - 1;
+      else return -node.offsets[limit - 1] - 1 + node.offsets[at] + index;
     }
   }
 
-  _write(root, tag = 0, label = "", blob = [], key = "", skip = -1) {
-    const at = this.head(key, skip);
+  _find(key = "", node = this._root) {
+    const DESCENDING = true;
+    return this._search(key, node, !DESCENDING);
+  }
 
-    const index = at < 0 ? -1 - at : at;
-    const fasten = index === 0 || index === root.totals[count - 1];
+  _locate(key = "", node = this._root) {
+    const DESCENDING = true;
+    return this._search(key, node, DESCENDING);
+  }
+
+  _onset(key = "", skip = 0, root = this._root) {
+    const total = this._measure(this._root);
+    const move = clampTo(-total - 1, total, skip);
+    const first = move === -1 ? -total - 1 : this._find(key, root);
+    const last = move === 0 ? -total - 1 : this._locate(key, root);
+
+    const at = move < 0 ? last + 1 + move : first + move;
+
+    if (at < first) return -total - 1 + first;
+    else if (at < 0) return first > last ? first : last;
+    else if (last < 0) return at;
+    else if (at > last) return -total - 1 + last;
+    else return at;
+  }
+
+  offsetOf(key = "", skip = 0) {
+    return this._onset(normalize(key), skip, this._root);
+  }
+
+  indexOf(key = "") {
+    return this._find(normalize(key), this._root);
+  }
+
+  lastIndexOf(key = "") {
+    return this._locate(normalize(key), this._root);
+  }
+
+  _val(at = 0, node = this._root) {
+    if (isLeafy(node)) {
+      const limit = node.vals.length;
+
+      if (limit > 0) return node.vals[clampTo(0, limit - 1, at)];
+      else return null;
+    } else {
+      const limit = node.offsets.length;
+      const temp = placeOfIndex(at, node);
+      const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
+      const cut = place > 0 ? node.offsets[place - 1] : 0;
+      const index = temp === -1 ? at - node.offsets[limit - 1] : at - cut;
+
+      return this._val(index, node.stems[place]);
+    }
+  }
+
+  _read(at = -2, root = this._root) {
+    const index = at < 0 ? this._measure(root) + 1 + at : at;
+
+    return this._val(index, root) || null;
+  }
+
+  valueOf(at = -2) {
+    const value = this._read(at, this._root);
+
+    return value ? value.data : undefined;
+  }
+
+  get(key = "", skip = 0) {
+    const at = this._onset(normalize(key), skip, this._root);
+    const value = at < 0 ? null : this._read(at, this._root);
+
+    return value ? value.data : undefined;
+  }
+
+  has(key = "", skip = 0) {
+    const at = this._onset(normalize(key), skip, this._root);
+
+    return at >= 0;
+  }
+
+  _hold(value, at, swap, nodes, max) {
+    if (isLeafy(nodes.original)) {
+      const limit = nodes.original.vals.length;
+      const index = clampTo(0, swap ? limit - 1 : limit, at);
+
+      if (swap) includeLeaf(index, nodes, value);
+      else if (limit < max) includeExtraLeaf(index, nodes, value);
+      else if (index < bisect(limit)) includeLessLeaf(index, nodes, value);
+      else includeMoreLeaf(index, nodes, value);
+    } else {
+      const { original } = nodes;
+      const limit = original.offsets.length;
+      const temp = placeOfIndex(at, original);
+      const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
+      const cut = place > 0 ? original.offsets[place - 1] : 0;
+      const index = temp === -1 ? at - original.offsets[limit - 1] : at - cut;
+
+      nodes.original = original.stems[place];
+      nodes.lower = nodes.original;
+      nodes.upper = nodes.original;
+
+      this._hold(value, index, swap, nodes, max);
+
+      nodes.original = original;
+
+      if (nodes.lower === nodes.upper) includeBranch(place, nodes);
+      else if (limit < max) includeExtraBranch(place, nodes);
+      else if (place === bisect(limit) - 1) includeDualBranch(place, nodes);
+      else if (place < bisect(limit)) includeLessBranch(place, nodes);
+      else includeMoreBranch(place, nodes);
+    }
+  }
+
+  _write(value, at = -1, root = this._root, max = this._max) {
+    const total = this._measure(root);
+    const swap = at < 0 ? 0 : 1;
+    const index = at < 0 ? total + 1 + at : at;
 
     const nodes = {
-      original: this._root || null,
-      before: null,
-      lower: null,
-      upper: null,
-      after: null
+      lower: root,
+      upper: root,
+      original: root
     };
 
-    this._add(tag, label, blob, key, index, nodes, fasten);
+    // TODO(jfinity): avoid rebalancing when "appending" or "prepending"
+
+    this._hold(value, index, swap, nodes, max);
 
     return nodes.lower === nodes.upper
       ? nodes.lower
-      : growRoot(nodes.lower, nodes.upper, this._branchsize);
+      : growRoot(root, [nodes.lower, nodes.upper], value.joint);
   }
 
-  patch(root, tag = 0, label = "", blob = "", key = "", skip = -1) {
-    return this._write(root, tag, label, blob, key, skip);
-  }
+  put(data = null, key = "", skip = -1, joint = null) {
+    const value = TVal(normalize(key), data, joint);
+    const at = this._onset(value.key, skip, this._root);
 
-  put(tag = 0, label = "", blob = new Uint8Array([]), key = "", skip = -1) {
-    this._root = this._write(this._root, tag, label, blob, key, skip);
+    if (at < 0) {
+      this._root = this._write(value, at, this._root, this._max);
+    } else if (skip < 0) {
+      const total = this._measure(this._root);
+
+      this._vals = this._write(value, -total - 1 + at, this._root, this._max);
+    } else {
+      this._root = this._write(value, at, this._root, this._max);
+    }
 
     return this;
   }
 
-  _subtract(at, nodes) {
-    // counterpart to _add
+  _drop(at, nodes) {
+    // TODO(jfinity): counterpart to _hold
   }
 
-  _erase(root, key = "", skip = -1) {
-    // counterpart to _write
+  _erase(joint = null, at = -2, root = this._root, min = this._min) {
+    // TODO(jfinity): counterpart to _write
   }
 
-  unset(root, key = "", skip = -1) {
-    return this._erase(root, key, skip);
-  }
+  unset(key = "", skip = 0, joint = null) {
+    const at = this._onset(normalize(key), skip, this._root);
 
-  delete(key = "", skip = -1) {
-    this._root = this._erase(this._root, key, skip);
+    this._root =
+      at < 0 ? this._root : this._erase(joint, at, this._root, this._min);
 
     return this;
   }
 
-  clear() {
-    this._root = growLeaf();
+  remove(index = -2, joint = null) {
+    const total = this._measure(this._root);
+    const at = index < 0 ? total + 1 + index : index;
+
+    this._root =
+      at < 0 || at >= total
+        ? this._root
+        : this._erase(joint, at, this._root, this._min);
 
     return this;
+  }
+
+  empty(joint = null) {
+    this._root = growLeaf(this._root.collation, null, joint);
+
+    return this;
+  }
+
+  set(key = "", data = null, joint = null, skip = 0) {
+    this.put(data, key, skip, joint);
+
+    return this;
+  }
+
+  delete(key = "", joint = null, skip = 0) {
+    const total = this._measure(this._root);
+
+    this.unset(key, skip, joint);
+
+    return total > this._measure(this._root);
+  }
+
+  clear(joint = null) {
+    this.empty(joint);
+
+    return undefined;
+  }
+
+  push() {
+    const joint = null;
+    const count = arguments.length;
+
+    for (let index = 0; index < count; index += 1) {
+      const value = TVal("", arguments[index], joint);
+
+      this._root = this._write(value, -1, this._root, this._max);
+    }
+
+    return this._measure(this._root);
+  }
+
+  pop(joint = null) {
+    const value = this._read(-2) || null;
+
+    this._root = this._erase(joint, -2, this._root, this._min);
+
+    return value ? value.data : undefined;
+  }
+
+  unshift() {
+    const joint = null;
+    const count = arguments.length;
+    let total = this._measure(this._root);
+
+    for (let index = 0; index < count; index += 1) {
+      const value = TVal("", arguments[index], joint);
+      const at = -total - 1 - index;
+
+      this._root = this._write(value, at, this._root, this._max);
+    }
+
+    return this._measure(this._root);
+  }
+
+  pop(joint = null) {
+    const value = this._read(0) || null;
+
+    this._root = this._erase(joint, 0, this._root, this._min);
+
+    return value ? value.data : undefined;
   }
 }
 
-export default function API() {
-  const { JFTree = {} } = LIB;
-  const { Unique, TreeStem, TreeDatum } = JFTree;
+class TFork {
+  // TODO(jfinity): proxy TTrunk to collect queries for a Deltas (MVCC)
+}
 
+export default function API() {
   return {
     POLYFILL,
 
-    Trunk: TreeTrunk,
-    Node: TreeNode,
+    TTrunk,
+    TStem,
+    TVal,
 
-    Ego: Unique,
-    Datum: TreeDatum,
-    Stem: TreeStem
+    normalize
   };
 }
 
 ENV.jftree = API;
 
 const {
-  Trunk: $$Trunk,
-  Node: $$Node,
+  POLYFILL: $$POLYFILL,
 
-  Ego: $$Ego,
-  Datum: $$Datum,
-  Stem: $$Stem
+  TTrunk: $$TTrunk,
+  TStem: $$TStem,
+  TVal: $$TVal,
+
+  normalize: $$normalize
 } = API();
 
 export {
-  POLYFILL,
-  $$Trunk as Trunk,
-  $$Node as Node,
-  $$Ego as Ego,
-  $$Datum as Datum,
-  $$Stem as Stem
+  $$POLYFILL as POLYFILL,
+  $$TTrunk as TTrunk,
+  $$TStem as TStem,
+  $$TVal as TVal,
+  $$normalize as normalize
 };

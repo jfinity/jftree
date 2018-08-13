@@ -18,7 +18,7 @@
 ### javascript
 
 ## flatbuffer files
-*_generated.js
+fbsgen/
 ## sandbox environment
 js/sandbox/
 

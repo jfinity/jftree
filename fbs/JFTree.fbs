@@ -1,42 +1,129 @@
 // $ flatc --gen-mutable --es6-js-export --js JFTree.fbs
 
-namespace JF.Tree; // join-fork
+namespace JF.Tree; // joint-fork
 
-struct Unique (original_order) {
-  instance: uint64; // reverse bytes when allocated
-  allocator: uint64;
+enum CollatorLocaleMatcher : uint8 {
+  BestFit = 0,
+
+  Lookup
 }
 
-table TreeDatum {
-  tag: int32;
-  blob: [ubyte] (required);
-  label: string; // (optional)
+enum CollatorUsage : uint8 {
+  Sort = 0,
+
+  Search
 }
 
-table TreeStem {
-  unique: Unique (required);
+enum CollatorSensitivity : uint8 {
+  Variant = 0,
 
-  keys: [string] (required);
-  /// stem.vals.length === 0 || stem.height === 0
-  vals: [TreeDatum] (required);
-  /// stem.vals.length === 0 || stem.height > 0
-  refs: [Unique] (required);
-
-  prior: string (required);
-  next: string (required);
-
-  commit: uint64;
-  /// local commit last merged into origin
-  merge: uint64;
-
-  width: uint64;
-  height: uint8;
+  Base,
+  Accent,
+  Case
 }
 
-root_type TreeStem;
+enum CollatorCaseFirst : uint8 {
+  False = 0,
+
+  Upper,
+  Lower
+}
+
+table Collation {
+  locales: [string];
+
+  localeMatcher: CollatorLocaleMatcher;
+
+  usage: CollatorUsage;
+
+  sensitivity: CollatorSensitivity;
+
+  caseFirst: CollatorCaseFirst;
+
+  ignorePunctuation: bool;
+
+  numeric: bool;
+}
+
+table KeyRange {
+  lower: string;
+  upper: string;
+}
+
+table Joint {
+  version: float64; // monotonic ticker
+
+  basis: float64; // monotonic checksum (rebase detection)
+
+  series: string (required); // repository identifier
+}
+
+table Val {
+  key: string; // "lists" use to id presences
+
+  data: [ubyte] (required);
+
+  joint: [ubyte] (required, nested_flatbuffer: "Joint");
+}
+
+table Stem {
+  ego: string (required);
+
+  joint: [ubyte] (required, nested_flatbuffer: "Joint");
+
+  collation: Collation; // indicates sorting order of keys
+
+  inner: KeyRange (required);
+  outer: KeyRange;
+
+  vals: [Val];
+  stems: [Stem];
+  gauges: [float64]; // approx. bytesize by stem "depth"
+  offsets: [int64];
+
+  height: int8 = 0;
+}
+
+table Fork {
+  joint: [ubyte] (required, nested_flatbuffer: "Joint");
+
+  head: Delta (required);
+
+  upstream: Stem; // []Joint (ancestor fork points)
+  merged: Stem; // []Joint (siblings, niblings, and removals)
+
+  log: Stem; // []Delta
+}
+
+table Delta {
+  ego: string (required);
+
+  command: string; // ego of conceptual change representation
+
+  now: Stem; // {}Val
+  then: Stem; // {}Val
+
+  queries: Stem; // read []Range post "fork" (w.r.t. "now")
+}
+
+union Range { KeyRange, WidthRange }
+
+table WidthRange {
+  key: string;
+  offset: int64;
+  width: int64;
+}
+
+root_type Val;
+root_type Stem;
+root_type Fork;
+root_type Joint;
+root_type Delta;
 
 // remember that decoding keys is secondary to ordering them
 // (paired-values are already decoded)
 
-// use cockroachdb to cache TreeStem records
+// use cockroachdb to cache Tree.Stem records
 // support a "lagging" replica of the "main" fork in dgraph
+
+// provided tree access, a key-range is a pair of indices
