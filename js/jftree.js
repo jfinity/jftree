@@ -234,7 +234,7 @@ function bSliceInsert(parent, begin, end, index, younger, older) {
   list.push(younger);
   list.push(older);
 
-  for (let at = index; at < end; at += 1) list.push(stems[at]);
+  for (let at = index + 1; at < end; at += 1) list.push(stems[at]);
 
   return TStem(height, collation, list, null, younger.joint, "", null);
 }
@@ -364,7 +364,7 @@ class TTrunk {
 
       if (index > -1) return at > 0 ? node.offsets[at - 1] + index : index;
       else if (at >= limit) return -node.offsets[limit - 1] - 1;
-      else return -node.offsets[limit - 1] - 1 + node.offsets[at] + index;
+      else return -node.offsets[limit - 1] - 1 + node.offsets[at] + 1 + index;
     }
   }
 
@@ -381,18 +381,20 @@ class TTrunk {
   _onset(key = "", skip = 0, root = this._root) {
     const total = this._measure(this._root);
     const move = clampTo(-total - 1, total, skip);
-    const first = this._find(key, root);
-    const last = first < 0 ? first : this._locate(key, root);
+    const first = move < -2 || move > 0 ? this._find(key, root) : -1;
+    const last = first < 0 && move !== -1 ? first : this._locate(key, root);
 
-    if (first < 0) return first;
+    if (move === 0) return this._find(key, root);
+    else if (move === -1) return last < 0 ? last : -total - 1 + last + 1;
+    else if (move === -2) return this._locate(key, root);
+    else if (first < 0) return first;
     else if (last < 0) return last;
-    else if (move === -1) return -total - 1 + last + 1;
-    else if (move > -1) {
-      if (first + move > last) return -total - 1 + last + 1;
-      else return first + move;
-    } else {
+    else if (move < 0) {
       if (last + 2 + move < first) return -total - 1 + first;
       else return last + 2 + move;
+    } else {
+      if (first + move > last) return -total - 1 + last + 1;
+      else return first + move;
     }
   }
 

@@ -72,6 +72,7 @@ table Stem {
   joint: [ubyte] (required, nested_flatbuffer: "Joint");
 
   collation: Collation; // indicates sorting order of keys
+  // (consider if there is a "hash" alternative for collation)
 
   inner: KeyRange (required);
   outer: KeyRange;
