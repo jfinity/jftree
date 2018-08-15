@@ -143,11 +143,11 @@ function TStem(height, collation, stems, vals, joint, ego, gauges) {
       ? (amount || null) && stems[amount - 1].upper
       : (limit || null) && vals[limit - 1].key,
 
-    vals: vals || null,
-    stems: stems || null,
     offsets: stems
       ? stems.reduce(!stems.every(isLeafy) ? sumBranches : sumLeaves, [])
       : null,
+    stems: stems || null,
+    vals: vals || null,
 
     ego: ego || "",
     joint: joint || null,
@@ -167,7 +167,7 @@ function lSliceSet(stem, begin, end, index, value) {
   const middle = clampTo(0, vals.length - 1, index);
   const list = vals.slice(begin, end);
 
-  list[middle] = value;
+  list[middle - begin] = value;
 
   return TStem(height, collation, null, list, value.joint, "", null);
 }
@@ -216,11 +216,18 @@ function includeMoreLeaf(at, nodes, value) {
   nodes.upper = lSliceInsert(nodes.original, half, size, at, value);
 }
 
+function bSlicePart(parent, begin, end, joint) {
+  const { height, collation, stems } = parent;
+  const list = stems.slice(begin, end);
+
+  return TStem(height, collation, list, null, joint, "", null);
+}
+
 function bSliceSet(parent, begin, end, index, node) {
   const { height, collation, stems } = parent;
   const list = stems.slice(begin, end);
 
-  list[index] = node;
+  list[index - begin] = node;
 
   return TStem(height, collation, list, null, node.joint, "", null);
 }
@@ -270,7 +277,7 @@ function includeLessBranch(place, nodes) {
   const split = bisect(count);
 
   nodes.lower = bSliceInsert(original, 0, split, place, lower, upper);
-  nodes.upper = bSliceSet(original, split, count, place, upper);
+  nodes.upper = bSlicePart(original, split, count, lower.joint);
 }
 
 function includeMoreBranch(place, nodes) {
@@ -278,7 +285,7 @@ function includeMoreBranch(place, nodes) {
   const count = original.stems.length;
   const split = bisect(count);
 
-  nodes.lower = bSliceSet(original, 0, split, place, lower);
+  nodes.lower = bSlicePart(original, 0, split, lower.joint);
   nodes.upper = bSliceInsert(original, split, count, place, lower, upper);
 }
 
@@ -478,6 +485,10 @@ class TTrunk {
     return node;
   }
 
+  elevation() {
+    return this._root.height;
+  }
+
   size() {
     return _measure(this._root);
   }
@@ -536,8 +547,7 @@ class TTrunk {
   unset(key = "", skip = 0, joint = null) {
     const at = _onset(this._root, normalize(key), skip);
 
-    this._root =
-      at < 0 ? this._root : _erase(this._root, at, joint, this._min);
+    this._root = at < 0 ? this._root : _erase(this._root, at, joint, this._min);
 
     return this;
   }
