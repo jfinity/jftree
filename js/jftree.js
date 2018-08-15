@@ -360,10 +360,10 @@ class TTrunk {
       const index =
         at < limit
           ? this._search(key, node.stems[at], descending)
-          : -node.offsets[at];
+          : -node.offsets[at - 1];
 
       if (index > -1) return at > 0 ? node.offsets[at - 1] + index : index;
-      else if (at >= limit) return -node.offsets[limit - 1] - 1;
+      else if (at >= limit) return -1;
       else return -node.offsets[limit - 1] - 1 + node.offsets[at] + 1 + index;
     }
   }
@@ -420,8 +420,7 @@ class TTrunk {
       const limit = node.offsets.length;
       const temp = placeOfIndex(at, node);
       const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
-      const cut = place > 0 ? node.offsets[place - 1] : 0;
-      const index = temp === -1 ? at - node.offsets[limit - 1] : at - cut;
+      const index = place > 0 ? at - node.offsets[place - 1] : at - 0;
 
       return this._val(index, node.stems[place]);
     }
@@ -452,7 +451,7 @@ class TTrunk {
     return at >= 0;
   }
 
-  _hold(value, at, swap, nodes, max) {
+  _hold(value, at, swap, max, nodes) {
     if (isLeafy(nodes.original)) {
       const limit = nodes.original.vals.length;
       const index = clampTo(0, swap ? limit - 1 : limit, at);
@@ -466,14 +465,13 @@ class TTrunk {
       const limit = original.offsets.length;
       const temp = placeOfIndex(at, original);
       const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
-      const cut = place > 0 ? original.offsets[place - 1] : 0;
-      const index = temp === -1 ? at - original.offsets[limit - 1] : at - cut;
+      const index = place > 0 ? at - original.offsets[place - 1] : at - 0;
 
       nodes.original = original.stems[place];
       nodes.lower = nodes.original;
       nodes.upper = nodes.original;
 
-      this._hold(value, index, swap, nodes, max);
+      this._hold(value, index, swap, max, nodes);
 
       nodes.original = original;
 
@@ -483,6 +481,8 @@ class TTrunk {
       else if (place < bisect(limit)) includeLessBranch(place, nodes);
       else includeMoreBranch(place, nodes);
     }
+
+    return nodes;
   }
 
   _write(value, at = -1, root = this._root, max = this._max) {
@@ -498,7 +498,7 @@ class TTrunk {
 
     // TODO(jfinity): avoid rebalancing when "appending" or "prepending"
 
-    this._hold(value, index, swap, nodes, max);
+    this._hold(value, index, swap, max, nodes);
 
     return nodes.lower === nodes.upper
       ? nodes.lower
