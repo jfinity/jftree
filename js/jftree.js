@@ -288,12 +288,155 @@ function growLeaf(collation = null, val = null, joint = null) {
   return TStem(height, collation, null, val ? [val] : [], joint, "", null);
 }
 
-function growRoot(root, stems, joint = null) {
-  const { height, collation } = root;
+function growRoot(node, stems, joint = null) {
+  const { height, collation } = node;
   const list =
     stems && stems.length ? stems : [growLeaf(collation, null, joint)];
 
   return TStem(height + 1, collation, list, null, joint, "", null);
+}
+
+function _measure(node) {
+  return isLeafy(node)
+    ? node.vals.length
+    : node.offsets[node.offsets.length - 1];
+}
+
+function _search(node, key = "", descending = false) {
+  if (isLeafy(node)) {
+    const limit = node.vals.length;
+    const temp = descending ? descendKey(key, node) : ascendKey(key, node);
+
+    if (temp < 0) return temp === -1 ? -1 : -limit - 1;
+    else if (key === node.vals[temp].key) return temp;
+    else return descending ? -limit - 1 + temp + 1 : -limit - 1 + temp;
+  } else {
+    const limit = node.offsets.length;
+    const temp = descending ? descendKey(key, node) : ascendKey(key, node);
+    const at = temp === -1 ? limit : clampTo(0, limit - 1, temp);
+    const index =
+      at < limit
+        ? _search(node.stems[at], key, descending)
+        : -node.offsets[at - 1];
+
+    if (index > -1) return at > 0 ? node.offsets[at - 1] + index : index;
+    else if (at >= limit) return -1;
+    else return -node.offsets[limit - 1] - 1 + node.offsets[at] + 1 + index;
+  }
+}
+
+function _find(node, key = "") {
+  const DESCENDING = true;
+  return _search(node, key, !DESCENDING);
+}
+
+function _locate(node, key = "") {
+  const DESCENDING = true;
+  return _search(node, key, DESCENDING);
+}
+
+function _onset(node, key = "", skip = 0) {
+  const total = _measure(node);
+  const move = clampTo(-total - 1, total, skip);
+  const first = move < -2 || move > 0 ? _find(node, key) : -1;
+  const last = first < 0 && move !== -1 ? first : _locate(node, key);
+
+  if (move === 0) return _find(node, key);
+  else if (move === -1) return last < 0 ? last : -total - 1 + last + 1;
+  else if (move === -2) return _locate(node, key);
+  else if (first < 0) return first;
+  else if (last < 0) return last;
+  else if (move < 0) {
+    if (last + 2 + move < first) return -total - 1 + first;
+    else return last + 2 + move;
+  } else {
+    if (first + move > last) return -total - 1 + last + 1;
+    else return first + move;
+  }
+}
+
+function _val(node, at) {
+  if (isLeafy(node)) {
+    const limit = node.vals.length;
+
+    if (limit > 0) return node.vals[clampTo(0, limit - 1, at)];
+    else return null;
+  } else {
+    const limit = node.offsets.length;
+    const temp = placeOfIndex(at, node);
+    const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
+    const index = place > 0 ? at - node.offsets[place - 1] : at - 0;
+
+    return _val(node.stems[place], index);
+  }
+}
+
+function _read(node, index = -2) {
+  const at = index < 0 ? _measure(node) + 1 + index : index;
+
+  return _val(node, at) || null;
+}
+
+function _hold(value, at, swap, max, nodes) {
+  if (isLeafy(nodes.original)) {
+    const limit = nodes.original.vals.length;
+    const index = clampTo(0, swap ? limit - 1 : limit, at);
+
+    if (swap) includeLeaf(index, nodes, value);
+    else if (limit < max) includeExtraLeaf(index, nodes, value);
+    else if (index < bisect(limit)) includeLessLeaf(index, nodes, value);
+    else includeMoreLeaf(index, nodes, value);
+  } else {
+    const { original } = nodes;
+    const limit = original.offsets.length;
+    const temp = placeOfIndex(at, original);
+    const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
+    const index = place > 0 ? at - original.offsets[place - 1] : at - 0;
+
+    nodes.original = original.stems[place];
+    nodes.lower = nodes.original;
+    nodes.upper = nodes.original;
+
+    _hold(value, index, swap, max, nodes);
+
+    nodes.original = original;
+
+    if (nodes.lower === nodes.upper) includeBranch(place, nodes);
+    else if (limit < max) includeExtraBranch(place, nodes);
+    else if (place === bisect(limit) - 1) includeDualBranch(place, nodes);
+    else if (place < bisect(limit)) includeLessBranch(place, nodes);
+    else includeMoreBranch(place, nodes);
+  }
+
+  return nodes;
+}
+
+function _write(root, value, index = -1, max = MAX_SIZE) {
+  const total = _measure(root);
+  const swap = index < 0 ? 0 : 1;
+  const at = index < 0 ? total + 1 + index : index;
+
+  const nodes = {
+    lower: root,
+    upper: root,
+    original: root
+  };
+
+  // TODO(jfinity): avoid rebalancing when "appending" or "prepending"
+
+  _hold(value, at, swap, max, nodes);
+
+  return nodes.lower === nodes.upper
+    ? nodes.lower
+    : growRoot(root, [nodes.lower, nodes.upper], value.joint);
+}
+
+function _drop(at, original, lower, upper, joint) {
+  // TODO(jfinity): counterpart to _hold
+}
+
+function _erase(root, index = -2, joint = null, min = MIN_SIZE) {
+  // TODO(jfinity): counterpart to _write
 }
 
 class TTrunk {
@@ -335,218 +478,78 @@ class TTrunk {
     return node;
   }
 
-  _measure(root = this._root) {
-    return isLeafy(root)
-      ? root.vals.length
-      : root.offsets[root.offsets.length - 1];
-  }
-
   size() {
-    return this._measure(this._root);
-  }
-
-  _search(key = "", node = this._root, descending = false) {
-    if (isLeafy(node)) {
-      const limit = node.vals.length;
-      const temp = descending ? descendKey(key, node) : ascendKey(key, node);
-
-      if (temp < 0) return temp === -1 ? -1 : -limit - 1;
-      else if (key === node.vals[temp].key) return temp;
-      else return descending ? -limit - 1 + temp + 1 : -limit - 1 + temp;
-    } else {
-      const limit = node.offsets.length;
-      const temp = descending ? descendKey(key, node) : ascendKey(key, node);
-      const at = temp === -1 ? limit : clampTo(0, limit - 1, temp);
-      const index =
-        at < limit
-          ? this._search(key, node.stems[at], descending)
-          : -node.offsets[at - 1];
-
-      if (index > -1) return at > 0 ? node.offsets[at - 1] + index : index;
-      else if (at >= limit) return -1;
-      else return -node.offsets[limit - 1] - 1 + node.offsets[at] + 1 + index;
-    }
-  }
-
-  _find(key = "", node = this._root) {
-    const DESCENDING = true;
-    return this._search(key, node, !DESCENDING);
-  }
-
-  _locate(key = "", node = this._root) {
-    const DESCENDING = true;
-    return this._search(key, node, DESCENDING);
-  }
-
-  _onset(key = "", skip = 0, root = this._root) {
-    const total = this._measure(this._root);
-    const move = clampTo(-total - 1, total, skip);
-    const first = move < -2 || move > 0 ? this._find(key, root) : -1;
-    const last = first < 0 && move !== -1 ? first : this._locate(key, root);
-
-    if (move === 0) return this._find(key, root);
-    else if (move === -1) return last < 0 ? last : -total - 1 + last + 1;
-    else if (move === -2) return this._locate(key, root);
-    else if (first < 0) return first;
-    else if (last < 0) return last;
-    else if (move < 0) {
-      if (last + 2 + move < first) return -total - 1 + first;
-      else return last + 2 + move;
-    } else {
-      if (first + move > last) return -total - 1 + last + 1;
-      else return first + move;
-    }
+    return _measure(this._root);
   }
 
   offsetOf(key = "", skip = 0) {
-    return this._onset(normalize(key), skip, this._root);
+    return _onset(this._root, normalize(key), skip);
   }
 
   indexOf(key = "") {
-    return this._find(normalize(key), this._root);
+    return _find(this._root, normalize(key));
   }
 
   lastIndexOf(key = "") {
-    return this._locate(normalize(key), this._root);
+    return _locate(this._root, normalize(key));
   }
 
-  _val(at = 0, node = this._root) {
-    if (isLeafy(node)) {
-      const limit = node.vals.length;
-
-      if (limit > 0) return node.vals[clampTo(0, limit - 1, at)];
-      else return null;
-    } else {
-      const limit = node.offsets.length;
-      const temp = placeOfIndex(at, node);
-      const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
-      const index = place > 0 ? at - node.offsets[place - 1] : at - 0;
-
-      return this._val(index, node.stems[place]);
-    }
-  }
-
-  _read(at = -2, root = this._root) {
-    const index = at < 0 ? this._measure(root) + 1 + at : at;
-
-    return this._val(index, root) || null;
-  }
-
-  valueOf(at = -2) {
-    const value = this._read(at, this._root);
+  valueOf(index = -2) {
+    const value = _read(this._root, index);
 
     return value ? value.data : undefined;
   }
 
   get(key = "", skip = 0) {
-    const at = this._onset(normalize(key), skip, this._root);
-    const value = at < 0 ? null : this._read(at, this._root);
+    const at = _onset(this._root, normalize(key), skip);
+    const value = at < 0 ? null : _read(this._root, at);
 
     return value ? value.data : undefined;
   }
 
   has(key = "", skip = 0) {
-    const at = this._onset(normalize(key), skip, this._root);
+    const at = _onset(this._root, normalize(key), skip);
 
     return at >= 0;
   }
 
-  _hold(value, at, swap, max, nodes) {
-    if (isLeafy(nodes.original)) {
-      const limit = nodes.original.vals.length;
-      const index = clampTo(0, swap ? limit - 1 : limit, at);
-
-      if (swap) includeLeaf(index, nodes, value);
-      else if (limit < max) includeExtraLeaf(index, nodes, value);
-      else if (index < bisect(limit)) includeLessLeaf(index, nodes, value);
-      else includeMoreLeaf(index, nodes, value);
-    } else {
-      const { original } = nodes;
-      const limit = original.offsets.length;
-      const temp = placeOfIndex(at, original);
-      const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
-      const index = place > 0 ? at - original.offsets[place - 1] : at - 0;
-
-      nodes.original = original.stems[place];
-      nodes.lower = nodes.original;
-      nodes.upper = nodes.original;
-
-      this._hold(value, index, swap, max, nodes);
-
-      nodes.original = original;
-
-      if (nodes.lower === nodes.upper) includeBranch(place, nodes);
-      else if (limit < max) includeExtraBranch(place, nodes);
-      else if (place === bisect(limit) - 1) includeDualBranch(place, nodes);
-      else if (place < bisect(limit)) includeLessBranch(place, nodes);
-      else includeMoreBranch(place, nodes);
-    }
-
-    return nodes;
-  }
-
-  _write(value, at = -1, root = this._root, max = this._max) {
-    const total = this._measure(root);
-    const swap = at < 0 ? 0 : 1;
-    const index = at < 0 ? total + 1 + at : at;
-
-    const nodes = {
-      lower: root,
-      upper: root,
-      original: root
-    };
-
-    // TODO(jfinity): avoid rebalancing when "appending" or "prepending"
-
-    this._hold(value, index, swap, max, nodes);
-
-    return nodes.lower === nodes.upper
-      ? nodes.lower
-      : growRoot(root, [nodes.lower, nodes.upper], value.joint);
-  }
-
   put(data = null, key = "", skip = -1, joint = null) {
     const value = TVal(normalize(key), data, joint);
-    const at = this._onset(value.key, skip, this._root);
+    const at = _onset(this._root, value.key, skip);
+    const index = at < 0 ? at : -_measure(this._root) - 1 + at;
 
-    if (at < 0) {
-      this._root = this._write(value, at, this._root, this._max);
-    } else if (skip < 0) {
-      const total = this._measure(this._root);
-
-      this._root = this._write(value, -total - 1 + at, this._root, this._max);
-    } else {
-      this._root = this._write(value, at, this._root, this._max);
-    }
+    this._root = _write(this._root, value, index, this._max);
 
     return this;
   }
 
-  _drop(at, nodes) {
-    // TODO(jfinity): counterpart to _hold
-  }
+  assign(data = null, key = "", skip = 0, joint = null) {
+    const value = TVal(normalize(key), data, joint);
+    const at = _onset(this._root, value.key, skip);
+    const index = at < -1 ? _measure(this._root) + 1 + at : at;
 
-  _erase(joint = null, at = -2, root = this._root, min = this._min) {
-    // TODO(jfinity): counterpart to _write
+    this._root = _write(this._root, value, index, this._max);
+
+    return this;
   }
 
   unset(key = "", skip = 0, joint = null) {
-    const at = this._onset(normalize(key), skip, this._root);
+    const at = _onset(this._root, normalize(key), skip);
 
     this._root =
-      at < 0 ? this._root : this._erase(joint, at, this._root, this._min);
+      at < 0 ? this._root : _erase(this._root, at, joint, this._min);
 
     return this;
   }
 
   remove(index = -2, joint = null) {
-    const total = this._measure(this._root);
+    const total = _measure(this._root);
     const at = index < 0 ? total + 1 + index : index;
 
     this._root =
       at < 0 || at >= total
         ? this._root
-        : this._erase(joint, at, this._root, this._min);
+        : _erase(this._root, at, joint, this._min);
 
     return this;
   }
@@ -558,17 +561,17 @@ class TTrunk {
   }
 
   set(key = "", data = null, joint = null, skip = 0) {
-    this.put(data, key, skip, joint);
+    this.assign(data, key, skip, joint);
 
     return this;
   }
 
   delete(key = "", joint = null, skip = 0) {
-    const total = this._measure(this._root);
+    const total = _measure(this._root);
 
     this.unset(key, skip, joint);
 
-    return total > this._measure(this._root);
+    return total > _measure(this._root);
   }
 
   clear(joint = null) {
@@ -584,16 +587,16 @@ class TTrunk {
     for (let index = 0; index < count; index += 1) {
       const value = TVal("", arguments[index], joint);
 
-      this._root = this._write(value, -1, this._root, this._max);
+      this._root = _write(this._root, value, -1, this._max);
     }
 
-    return this._measure(this._root);
+    return _measure(this._root);
   }
 
   pop(joint = null) {
-    const value = this._read(-2) || null;
+    const value = _read(this._root, -2) || null;
 
-    this._root = this._erase(joint, -2, this._root, this._min);
+    this._root = _erase(this._root, -2, joint, this._min);
 
     return value ? value.data : undefined;
   }
@@ -601,22 +604,22 @@ class TTrunk {
   unshift() {
     const joint = null;
     const count = arguments.length;
-    let total = this._measure(this._root);
+    let total = _measure(this._root);
 
     for (let index = 0; index < count; index += 1) {
       const value = TVal("", arguments[index], joint);
       const at = -total - 1 - index;
 
-      this._root = this._write(value, at, this._root, this._max);
+      this._root = _write(this._root, value, at, this._max);
     }
 
-    return this._measure(this._root);
+    return _measure(this._root);
   }
 
   pop(joint = null) {
-    const value = this._read(0) || null;
+    const value = this._read(this._root, 0) || null;
 
-    this._root = this._erase(joint, 0, this._root, this._min);
+    this._root = this._erase(this._root, 0, joint, this._min);
 
     return value ? value.data : undefined;
   }

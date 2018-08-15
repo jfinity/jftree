@@ -161,10 +161,20 @@ class TDummy {
     const total = this.size();
     const value = TVal(normalize(key), data, null);
     const at = this.offsetOf(value.key, skip);
+    const index = at < 0 ? at : -total - 1 + at;
 
-    if (at < 0) this._vals = write.call(this, value, at);
-    else if (skip < 0) this._vals = write.call(this, value, -total - 1 + at);
-    else this._vals = write.call(this, value, at);
+    this._vals = write.call(this, value, index);
+
+    return this;
+  }
+
+  assign(data = null, key = "", skip = 0) {
+    const total = this.size();
+    const value = TVal(normalize(key), data, null);
+    const at = this.offsetOf(value.key, skip);
+    const index = at < -1 ? total + 1 + at : at;
+
+    this._vals = write.call(this, value, index);
 
     return this;
   }
@@ -281,17 +291,24 @@ export function slowcheck(log = []) {
     let real = new TTrunk();
 
     const jobs = {
-      init() {
+      init(min, max, collation) {
         fake = new TDummy();
-        real = new TTrunk();
+        real = new TTrunk(undefined, collation, min, max);
       },
 
       multiput(key = "", skip = -1, extra = 0) {
         let count = 1 + Math.max(0, 0 | extra);
 
-        while (count-- > 0) {
-          real.put(key + " : " + count, key, 0 | skip);
-          fake.put(key + " : " + count, key, 0 | skip);
+        if (skip < 0) {
+          while (count-- > 0) {
+            real.put(key + " : " + count, key, 0 | skip);
+            fake.put(key + " : " + count, key, 0 | skip);
+          }
+        } else {
+          while (count-- > 0) {
+            real.assign(key + " : " + count, key, 0 | skip);
+            fake.assign(key + " : " + count, key, 0 | skip);
+          }
         }
       },
 
@@ -342,7 +359,7 @@ export function slowcheck(log = []) {
       if (!log.length) {
         recorder(log, jobs);
 
-        jobs.init();
+        jobs.init(2, 3);
 
         let count = 20 + noise() * 50;
 
@@ -401,7 +418,7 @@ ENV.testsuite = testsuite;
 ENV.slowcheck = slowcheck;
 
 export function testsuite(code = 0) {
-  let id = code || 8;
+  let id = code || 9;
 
   if (!code) {
     return Promise.resolve(null).then(function run(log) {
@@ -413,6 +430,45 @@ export function testsuite(code = 0) {
 
   try {
     switch (code) {
+      case 9:
+        throw slowcheck([
+          ["init", 2, 3],
+          ["multiput", "0.21519873997999062", -1, 3],
+          [
+            "checkAll",
+            [
+              "0.8614778223392554",
+              "0.666033091951475",
+              "0.5542667184141263",
+              "0.8585616365174087",
+              "0.9584161728383431",
+              "0.07725108545496173",
+              "0.7185473873673451",
+              "0.3830294317231022",
+              "0.6102293503575891",
+              "0.2497037599571188",
+              "0.7533352841389314",
+              "0.6766499686803606"
+            ]
+          ],
+          ["multiput", "0.32064740281634085", -2, 1],
+          ["checkAll", ["0.1413732347645824"]],
+          ["multiput", "0.40285544761099756", -3, 1],
+          [
+            "checkAll",
+            [
+              "0.11652265675690243",
+              "0.260652039216837",
+              "0.8764582535736176",
+              "0.8897054446372745",
+              "0.11958791306485517",
+              "0.833620152337726",
+              "0.5964505532089863",
+              "0.2763475650473619"
+            ]
+          ]
+        ]);
+
       case 8:
         throw slowcheck([
           ["init"],
