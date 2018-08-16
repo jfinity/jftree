@@ -42,7 +42,7 @@ function clampTo(lower, upper, index) {
 
 function placeOfIndex(at, stem) {
   // TODO(jfinity): benchmark with binary search
-  const count = at < 0 ? 0 : stem.offsets.length;
+  const count = stem.offsets.length;
 
   for (let index = 0; index < count; index += 1) {
     if (at < stem.offsets[index]) {
@@ -50,7 +50,7 @@ function placeOfIndex(at, stem) {
     }
   }
 
-  return at < 0 ? -2 : -1;
+  return count - 1;
 }
 
 function ascendKey(key, stem) {
@@ -108,23 +108,18 @@ function isLeafy(branch) {
   return !branch.stems;
 }
 
-function sumLeaves(offsets, stem, index) {
-  const width = stem.vals.length;
-  const total = index ? offsets[index - 1] : 0;
+function sumStems(stems) {
+  const count = stems.length;
+  const result = new Array(count);
+  let total = 0;
 
-  offsets.push(total + width);
+  for (let index = 0; index < count; index += 1) {
+    const offsets = stems[index].offsets || null;
+    total += offsets ? offsets[offsets.length - 1] : stems[index].vals.length;
+    result[index] = total;
+  }
 
-  return offsets;
-}
-
-function sumBranches(offsets, stem, index) {
-  const count = stem.offsets.length;
-  const width = count ? stem.offsets[count - 1] : 0;
-  const total = index ? offsets[index - 1] : 0;
-
-  offsets.push(total + width);
-
-  return offsets;
+  return result;
 }
 
 function TStem(height, collation, stems, vals, joint, ego, gauges) {
@@ -143,9 +138,7 @@ function TStem(height, collation, stems, vals, joint, ego, gauges) {
       ? (amount || null) && stems[amount - 1].upper
       : (limit || null) && vals[limit - 1].key,
 
-    offsets: stems
-      ? stems.reduce(!stems.every(isLeafy) ? sumBranches : sumLeaves, [])
-      : null,
+    offsets: stems ? sumStems(stems) : null,
     stems: stems || null,
     vals: vals || null,
 
@@ -162,26 +155,26 @@ function lSlicePart(stem, begin, end, joint) {
   return TStem(height, collation, null, list, joint, "", null);
 }
 
-function lSliceSet(stem, begin, end, index, value) {
+function lSliceSet(stem, begin, end, middle, value) {
   const { height, collation, vals } = stem;
-  const middle = clampTo(0, vals.length - 1, index);
+  const index = clampTo(0, vals.length - 1, middle);
   const list = vals.slice(begin, end);
 
-  list[middle - begin] = value;
+  list[index - begin] = value;
 
   return TStem(height, collation, null, list, value.joint, "", null);
 }
 
-function lSliceInsert(stem, begin, end, index, value) {
+function lSliceInsert(stem, begin, end, middle, value) {
   const { height, collation, vals } = stem;
-  const middle = clampTo(0, vals.length, index);
-  const list = [];
+  const index = clampTo(0, vals.length, middle);
+  const list = new Array(1 + end - begin);
 
-  for (let at = begin; at < middle; at += 1) list.push(vals[at]);
+  for (let at = begin; at < index; at += 1) list[at - begin] = vals[at];
 
-  list.push(value);
+  list[index - begin] = value;
 
-  for (let at = middle; at < end; at += 1) list.push(vals[at]);
+  for (let at = index; at < end; at += 1) list[1 + at - begin] = vals[at];
 
   return TStem(height, collation, null, list, value.joint, "", null);
 }
@@ -223,25 +216,26 @@ function bSlicePart(parent, begin, end, joint) {
   return TStem(height, collation, list, null, joint, "", null);
 }
 
-function bSliceSet(parent, begin, end, index, node) {
+function bSliceSet(parent, begin, end, middle, node) {
   const { height, collation, stems } = parent;
   const list = stems.slice(begin, end);
 
-  list[index - begin] = node;
+  list[middle - begin] = node;
 
   return TStem(height, collation, list, null, node.joint, "", null);
 }
 
-function bSliceInsert(parent, begin, end, index, younger, older) {
+function bSliceInsert(parent, begin, end, middle, younger, older) {
   const { height, collation, stems } = parent;
-  const list = [];
+  const index = clampTo(0, stems.length, middle);
+  const list = new Array(1 + end - begin);
 
-  for (let at = begin; at < index; at += 1) list.push(stems[at]);
+  for (let at = begin; at < index; at += 1) list[at - begin] = stems[at];
 
-  list.push(younger);
-  list.push(older);
+  list[index - begin] = younger;
+  list[1 + index - begin] = older;
 
-  for (let at = index + 1; at < end; at += 1) list.push(stems[at]);
+  for (let at = index + 1; at < end; at += 1) list[1 + at - begin] = stems[at];
 
   return TStem(height, collation, list, null, younger.joint, "", null);
 }
@@ -309,27 +303,31 @@ function _measure(node) {
     : node.offsets[node.offsets.length - 1];
 }
 
-function _search(node, key = "", descending = false) {
-  if (isLeafy(node)) {
-    const limit = node.vals.length;
-    const temp = descending ? descendKey(key, node) : ascendKey(key, node);
+function _lSearch(node, key, descending) {
+  const limit = node.vals.length;
+  const temp = descending ? descendKey(key, node) : ascendKey(key, node);
 
-    if (temp < 0) return temp === -1 ? -1 : -limit - 1;
-    else if (key === node.vals[temp].key) return temp;
-    else return descending ? -limit - 1 + temp + 1 : -limit - 1 + temp;
-  } else {
-    const limit = node.offsets.length;
-    const temp = descending ? descendKey(key, node) : ascendKey(key, node);
-    const at = temp === -1 ? limit : clampTo(0, limit - 1, temp);
-    const index =
-      at < limit
-        ? _search(node.stems[at], key, descending)
-        : -node.offsets[at - 1];
+  if (temp < 0) return temp === -1 ? -1 : -limit - 1;
+  else if (key === node.vals[temp].key) return temp;
+  else return descending ? -limit - 1 + temp + 1 : -limit - 1 + temp;
+}
 
-    if (index > -1) return at > 0 ? node.offsets[at - 1] + index : index;
-    else if (at >= limit) return -1;
-    else return -node.offsets[limit - 1] - 1 + node.offsets[at] + 1 + index;
-  }
+function _bSearch(node, key, descending) {
+  const limit = node.offsets.length;
+  const temp = descending ? descendKey(key, node) : ascendKey(key, node);
+  const at = temp === -1 ? limit : clampTo(0, limit - 1, temp);
+  const index =
+    at < limit
+      ? _search(node.stems[at], key, descending)
+      : -node.offsets[at - 1];
+
+  if (index > -1) return at > 0 ? node.offsets[at - 1] + index : index;
+  else if (at >= limit) return -1;
+  else return -node.offsets[limit - 1] - 1 + node.offsets[at] + 1 + index;
+}
+
+function _search(node, key, descending) {
+  return (isLeafy(node) ? _lSearch : _bSearch)(node, key, descending);
 }
 
 function _find(node, key = "") {
@@ -362,20 +360,22 @@ function _onset(node, key = "", skip = 0) {
   }
 }
 
+function _lVal(node, at) {
+  const limit = node.vals.length;
+
+  if (limit > 0) return node.vals[clampTo(0, limit - 1, at)];
+  else return null;
+}
+
+function _bVal(node, at) {
+  const place = placeOfIndex(at, node);
+  const index = place > 0 ? at - node.offsets[place - 1] : at - 0;
+
+  return _val(node.stems[place], index);
+}
+
 function _val(node, at) {
-  if (isLeafy(node)) {
-    const limit = node.vals.length;
-
-    if (limit > 0) return node.vals[clampTo(0, limit - 1, at)];
-    else return null;
-  } else {
-    const limit = node.offsets.length;
-    const temp = placeOfIndex(at, node);
-    const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
-    const index = place > 0 ? at - node.offsets[place - 1] : at - 0;
-
-    return _val(node.stems[place], index);
-  }
+  return (isLeafy(node) ? _lVal : _bVal)(node, at);
 }
 
 function _read(node, index = -2) {
@@ -384,36 +384,41 @@ function _read(node, index = -2) {
   return _val(node, at) || null;
 }
 
+function _prepend(value, max) {}
+
+function _lHold(value, at, swap, max, nodes) {
+  const limit = nodes.original.vals.length;
+  const index = clampTo(0, limit - swap, at);
+
+  if (swap) includeLeaf(index, nodes, value);
+  else if (limit < max) includeExtraLeaf(index, nodes, value);
+  else if (index < bisect(limit)) includeLessLeaf(index, nodes, value);
+  else includeMoreLeaf(index, nodes, value);
+}
+
+function _bHold(value, at, swap, max, nodes) {
+  const original = nodes.original;
+  const limit = original.offsets.length;
+  const place = placeOfIndex(at, original);
+  const index = place > 0 ? at - original.offsets[place - 1] : at - 0;
+
+  nodes.original = original.stems[place];
+  nodes.lower = nodes.original;
+  nodes.upper = nodes.original;
+
+  _hold(value, index, swap, max, nodes);
+
+  nodes.original = original;
+
+  if (nodes.lower === nodes.upper) includeBranch(place, nodes);
+  else if (limit < max) includeExtraBranch(place, nodes);
+  else if (place === bisect(limit) - 1) includeDualBranch(place, nodes);
+  else if (place < bisect(limit)) includeLessBranch(place, nodes);
+  else includeMoreBranch(place, nodes);
+}
+
 function _hold(value, at, swap, max, nodes) {
-  if (isLeafy(nodes.original)) {
-    const limit = nodes.original.vals.length;
-    const index = clampTo(0, swap ? limit - 1 : limit, at);
-
-    if (swap) includeLeaf(index, nodes, value);
-    else if (limit < max) includeExtraLeaf(index, nodes, value);
-    else if (index < bisect(limit)) includeLessLeaf(index, nodes, value);
-    else includeMoreLeaf(index, nodes, value);
-  } else {
-    const { original } = nodes;
-    const limit = original.offsets.length;
-    const temp = placeOfIndex(at, original);
-    const place = temp === -1 ? limit - 1 : clampTo(0, limit - 1, temp);
-    const index = place > 0 ? at - original.offsets[place - 1] : at - 0;
-
-    nodes.original = original.stems[place];
-    nodes.lower = nodes.original;
-    nodes.upper = nodes.original;
-
-    _hold(value, index, swap, max, nodes);
-
-    nodes.original = original;
-
-    if (nodes.lower === nodes.upper) includeBranch(place, nodes);
-    else if (limit < max) includeExtraBranch(place, nodes);
-    else if (place === bisect(limit) - 1) includeDualBranch(place, nodes);
-    else if (place < bisect(limit)) includeLessBranch(place, nodes);
-    else includeMoreBranch(place, nodes);
-  }
+  (isLeafy(nodes.original) ? _lHold : _bHold)(value, at, swap, max, nodes);
 
   return nodes;
 }
@@ -593,20 +598,22 @@ class TTrunk {
   push() {
     const joint = null;
     const count = arguments.length;
+    const at = this._root.upper ? _onset(this._root, "", -1) : -1;
 
     for (let index = 0; index < count; index += 1) {
       const value = TVal("", arguments[index], joint);
 
-      this._root = _write(this._root, value, -1, this._max);
+      this._root = _write(this._root, value, at, this._max);
     }
 
     return _measure(this._root);
   }
 
   pop(joint = null) {
-    const value = _read(this._root, -2) || null;
+    const at = this._root.upper ? _onset(this._root, "", -2) : -2;
+    const value = _read(this._root, at) || null;
 
-    this._root = _erase(this._root, -2, joint, this._min);
+    this._root = _erase(this._root, at, joint, this._min);
 
     return value ? value.data : undefined;
   }

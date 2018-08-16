@@ -1,5 +1,17 @@
 import jftree from "../jftree.js";
 
+/*
+
+((total, trunk) => {
+  let count = total;
+  console.time(trunk.constructor.name+total);
+  while (count-- > 0) trunk.push(count);
+  console.timeEnd(trunk.constructor.name+total);
+  return trunk;
+})(1000000, new (jftree()).TTrunk());
+
+*/
+
 const ENV = (that => this || that)(
   "undefined" !== typeof window ? window || {} : {}
 );
